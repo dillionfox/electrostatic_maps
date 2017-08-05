@@ -1,0 +1,64 @@
+#########################################
+#########################################
+###### Electrostatic Mapping code #######
+######### Dillion Fox, 7/18/17 ##########
+#########################################
+### original code by R. Remsing, 2014 ###
+#########################################
+#########################################
+
+The following files are included in this directory:
+
+~ interface_potential.cpp
+	- compile_interface_potential.sh
+~ example_files
+
+The following files are needed to compute the instantaneous interface
+~ chandler_willard.cpp
+	- compile_chandler_willard.sh
+	- make_index_file.tcl
+	- array_3D.h
+	- calphi.h
+	- Marching_Cube.h
+	- readpro.h
+
+indented lines show dependencies/helper files.
+
+chandler_willard.cpp calculates an instantaneous interface (II), which is effectively
+	a grid that lies between protein/molecules and water. 
+	***USAGE: ./interface_potential.out trajectory.xtc indices.txt
+	- This code requires the user to define the protein/molecules by their indices. 
+	The VMD script "make_index_file.tcl" can help with this. Just edit the 
+	atomselect command to grab the atoms you want the interface to wrap around 
+	and it will output a properly formatted file with atom types and indices.
+	- The code must also be editted to include the correct (1) number of protein 
+	atoms, (2) number of heavy protein atoms, (3) number of frames, (4) index
+	of the first water molecule, and (5) index of the last molecule. This isn't
+	ideal but it's what I have for now.
+	- The code can be compiled using the "compile_chandler_willard.sh" script,
+	but the path to the compiler must be updated. I've found that the Intel ICPC
+	compiler works well, but it should compile using other compilers.
+	- The path to the header files may need to be updated if they are not in the 
+	working path
+	***OUTPUT: protII.xtc will serve as the input for the interface_potential.cpp.
+	each frame from protII.xtc will also be output as .gro files.
+
+
+interface_potential.cpp calculates the electrostatic potential weighted by an error
+	function at each grid point from the II The potential calculation only
+	considers water atoms (3 point water model only!) with no distance cutoffs. 
+	This comes from Local Molecular Field theory and the resulting potential 
+	is interpreted as the collective polarization of water molecules at that point.
+	***USAGE: ./interface_potential.out protII.xtc trajectory.xtc
+	- Again, this comes with a script that may be useful for compiling.
+	***OUTPUT: Map.vtf is the most important file. You can load this into VMD
+	like any other molecule and it *should* work. The BETA field is populated
+	with the potential, so when you load it you will see the II and each grid
+	point colored by the strength of the potential.
+
+
+example_files includes a GROMACS trajectory (trajectory.xtc) and the appropriate
+	index file (indices.txt). The simulation kept the molecule (taurine in
+	an internal salt structure) fixed and let the water organize around it.
+	The c++ files have all of the parameters set for this test system.
+	
