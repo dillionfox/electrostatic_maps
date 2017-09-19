@@ -2,20 +2,22 @@ from __future__ import division
 import numpy as np
 from joblib import Parallel, delayed
 from joblib.pool import has_shareable_memory
-import MDAnalysis
 import time
+import MDAnalysis
+import CW_interface
 
-selection_key = "resname POPC"
-DCD = "membrane_example/sample.dcd"
-PSF = "membrane_example/sample.psf"
-II_traj = "membrane_example/II_0.pdb"
-
-global scale
-scale = 1.0
-
+#--- WRITE OUTPUT
 def write_pdb(coor,beta,fr):
-	print 'writing pdb...'
-	outfile = open("emap_"+str(fr)+".pdb","w")
+	"""
+	This function writes the coordinates of the Willard-Chandler instantaneous interface as a pdb,
+	and populates the Beta field with the long-range electrostatic potential
+	"""
+	global name_modifier
+	global verbose
+
+	if verbose >= 1:
+		print 'writing pdb...'
+	outfile = open("emap_"+str(fr)+str(name_modifier)+".pdb","w")
 	count_zeros = 0
 	for i in range(len(coor)):
 		if (coor[i][0]!=0 and coor[i][1]!=0 and coor[i][2]!=0):
@@ -38,16 +40,28 @@ def write_pdb(coor,beta,fr):
 	outfile.close()
 	return 0
 
+#--- EXTRACT COORDINATES
 def extract_traj_info(PSF,DCD,selection_key):
-        print 'loading...'
+	"""
+	This function uses MDAnalysis to extract coordinates from the trajectory
+	"""
+	global verbose
+
+	if verbose >= 1:
+        	print 'loading coordinates...'
         # load some variables into global namespace
         global n_heavy_atoms
         global pbc
+        global pbc_fr
 	global box_shift
+	global first_frame
+	global last_frame
+	global water_names
 
         uni = MDAnalysis.Universe(PSF,DCD)
         nframes = len(uni.trajectory)					# number of frames
 	box_shift = np.zeros((nframes,3))
+	pbc_fr = np.zeros((nframes,3))
 
         protein = uni.select_atoms(selection_key)			# identify atoms to build interface around
         heavy_atoms = protein.select_atoms('not name H*')		# Only need to consider heavy atoms
@@ -57,136 +71,145 @@ def extract_traj_info(PSF,DCD,selection_key):
 
         water = uni.select_atoms("resname TIP3")			# identify atoms to build interface around
         water_indices = water.indices 
+	water_names = water.names
         n_water = len(water.atoms)					# number of heavy protein atoms
         water_pos = np.zeros((nframes,n_water,3))
 
-        for fr in range(nframes):                                       # save coordinates for each frame
+	frames = range(nframes)
+        for fr in frames:                                       # save coordinates for each frame
                 uni.trajectory[fr]
+        	pbc = uni.dimensions[0:3]				# retrieve periodic bounds
+        	pbc_fr[fr] = pbc
         	sel = uni.select_atoms('all')
-		box_shift[fr] = -sel.atoms.center_of_mass()
-        	sel.atoms.translate(box_shift)				# center selection
+		box_shift[fr] = -sel.atoms.center_of_mass()+pbc/2.0	# first center at origin, then put vertx of quadrant 7 at origin
+        	sel.atoms.translate(box_shift[fr])			# center selection
 
         	protein = uni.select_atoms(selection_key)		# identify atoms to build interface around
         	heavy_atoms = protein.select_atoms('not name H*')	# Only need to consider heavy atoms
-		positions[fr] = heavy_atoms.positions/scale
+		positions[fr] = heavy_atoms.positions
 
         	water = uni.select_atoms("resname TIP3")		# identify atoms to build interface around
-		water_pos[fr] = water.positions/scale
+		water_pos[fr] = water.positions
 
-        pbc = uni.dimensions[0:3]/scale					# retrieve periodic bounds
+        pbc = uni.dimensions[0:3]					# retrieve periodic bounds
         return [nframes,positions,water_pos]
 
-def read_ii_coor(II_traj):
-	uni = MDAnalysis.Universe(II_traj)
-        nframes = len(uni.trajectory)					# number of frames
-	sel = uni.select_atoms('all')
-	II = len(sel.atoms)
-	ii_coor_all = np.zeros((nframes,II,3))
-	for fr in range(nframes):
-                uni.trajectory[fr]
-		sel = uni.select_atoms('all')
-        	sel.atoms.translate(box_shift[fr])			# center selection
-		ii_coor_all[fr] = sel.positions/scale
-	return [ii_coor_all,nframes]
-
-def compute_VRS(ii_point):
-	def erf(x):
-		sign = 1 if x >= 0 else -1
-		x = abs(x)
-		a1 =  0.254829592
-		a2 = -0.284496736
-		a3 =  1.421413741
-		a4 = -1.453152027
-		a5 =  1.061405429
-		p  =  0.3275911
-		t = 1.0/(1.0 + p*x)
-		y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*np.exp(-x*x)
-		return sign*y
-
-	vrs=0
-	SI_unit_conv = 1.084E8*1.602E-19*1E12 				# pV
-	ii_pos = ii_coor[ii_point]
-	for i in range(n_water)[::3]:
-		for j in range(3):
-			rvec = water_coor[i+j]-ii_pos
-			wrap = [int((rvec[i]/pbc[i])+0.5) for i in range(3)]
-			rvec = [rvec[i] - wrap[i]*pbc[i] for i in range(3)]
-			r = np.sqrt(np.dot(rvec,rvec))
-			vrs += chg[j] * erf(r/sigma) / (r)
-	return vrs*SI_unit_conv
-
-def compute_refVal():
-	def erf(x):
-		sign = 1 if x >= 0 else -1
-		x = abs(x)
-		a1 =  0.254829592
-		a2 = -0.284496736
-		a3 =  1.421413741
-		a4 = -1.453152027
-		a5 =  1.061405429
-		p  =  0.3275911
-		t = 1.0/(1.0 + p*x)
-		y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*np.exp(-x*x)
-		return sign*y
-
-	vrs=0
-	for i in range(n_water)[::3]:
-		for j in range(3):
-			r = np.sqrt(np.dot(water_coor[i+j],water_coor[i+j]))
-			vrs += chg[j] * erf(r/sigma) / (r)
-	return vrs
-
-def scale_potential(ii):
-	return VRS[ii]-refVal
-
-def compute_LREP(positions,ii_coor,water_coor):
-
-	global VRS
+#--- FUNCTION FOR COMPUTING LONG RANGE ELECTROSTATIC POTENTIAL
+def compute_LREP(ii_coor,water_coor):
+	"""
+	This function cycles through *every* interface point, and calls the function that calculates the long-range
+	electrostatic potential at each of those points.
+	"""
+	global verbose
 	global chg
-	global n_water
 	global sigma
+	global water_names
 
-	sigma = 0.45
+	sigma = 4.5
 	npro = n_heavy_atoms
 	nconf = 1.0
-	chg = [-0.834, 0.417, 0.417]	
-	sigma = 0.45
+
+	water_charge = {"OH2":-0.834, "H1":0.417, "H2":0.417}
+
 	II = len(ii_coor)
 	VRS = np.zeros(II)
-
+	SI_unit_conv = 1.084E8*1.602E-19*1E12 				# pV
 	n_water = water_coor.shape[0]
-	print 'starting parallel job...'
-	VRS = Parallel(n_jobs=8)(delayed(compute_VRS,has_shareable_memory)(ii_point) for ii_point in range(II)) 
+	print "n_water:", n_water
 
-	global refVal
-	refVal = compute_refVal()
+	for ii in range(II):
+		print ii, "of", II
+		vrs=0
+		ii_pos = ii_coor[ii]
+		for wc,wn in zip(water_coor,water_names):
+			#print ii_pos, wc
+			rvec = wc-ii_pos
+			wrap1 = [int((rvec[i]/pbc[i])+0.5) for i in range(3)]
+			wrap2 = [int((rvec[i]/pbc[i])-0.5) for i in range(3)]
+			rvec = [rvec[i] - wrap1[i]*pbc[i] for i in range(3)]
+			rvec = [rvec[i] - wrap2[i]*pbc[i] for i in range(3)]
+			r = np.sqrt(np.dot(rvec,rvec))
+			vrs += water_charge[wn] * CW_interface.erf(r/sigma) / (r)
+		VRS[ii] = vrs*SI_unit_conv
+	return VRS 
 
-	LREP = Parallel(n_jobs=8)(delayed(scale_potential,has_shareable_memory)(ii) for ii in range(II))
-	return LREP 
+def run_emaps(fr):
+	"""
+	This function takes in a set of II points for each frame and calculates the LREP for each frame using the
+	pertinent set of coordinates.
+	"""
+	global verbose
+	global box_shift
+	global positions
+	global water
+	global nframes
 
-def electrostatic_map():
-	time1 =time.time()
-	[nframes, positions,water] = extract_traj_info(PSF,DCD,selection_key)
-	[II_coor,nframes_ii] = read_ii_coor(II_traj)
-	time2 =time.time()
-	print 'data loaded. computing potential... time:', time2-time1
-	if nframes_ii != nframes:
-		print 'simulations do not match'
-		nframes = min(nframes,nframes_ii)
+	#--- EXTRACT INFO FOR FRAME, FR
+	if verbose >= 3:
+		print 'working on frame', fr+1, ' of', nframes
+	pos=positions[fr] 
+	water_coor = water[fr]
+	
+	#--- COMPUTE RHO
+	coarse_grain_start = time.time()
+	rho = CW_interface.compute_coarse_grain_density(pos,dL,pbc,n_heavy_atoms) # defines global variables: n_grid_pts, grid_spacing
+	coarse_grain_stop = time.time()
+	if verbose >= 2:
+		print 'elapsed time to compute coarse grain density:', coarse_grain_stop-coarse_grain_start
+	
+	#--- MARCHING CUBES
+	marching_cubes_start = time.time()
+	interface_coors = CW_interface.marching_cubes(rho) # defines global variables: cube_coor
+	marching_cubes_stop = time.time()
+	if verbose >= 2:
+		print 'elapsed time to run marching cubes:', marching_cubes_stop-marching_cubes_start
+	
+	##--- COMPUTE LONG RANGE ELECTROSTATIC POTENTIAL
+	LREP_start = time.time()
+	LREP = compute_LREP(interface_coors,water_coor)
+	LREP_stop = time.time()
+	if verbose >= 2:
+		print 'potential calculation completed. time elapsed:', LREP_stop-LREP_start
+	write_pdb(interface_coors,LREP,fr)
+	return 0
 
-	global water_coor
-	global ii_coor
-	time1 =time.time()
-	for fr in range(nframes):
-		pos = positions[fr]
-		water_coor = water[fr]
-		ii_coor = II_coor[fr]
+def electrostatic_map(grofile,trajfile,**kwargs):
+	"""
+	This is the MAIN function. It reads in all data and decides which functions should be called to
+	compute either averaged or individual electrostatic maps.
+	"""
+	#--- READ IN PARAMETERS FROM YAML FILE
+	global selection_key
+	global water_resname
+	global dL
+	global name_modifier
+	global verbose
+	global nthreads
+	global first_frame
+	global last_frame
 
-		LREP = compute_LREP(pos, ii_coor,water_coor)
-		print "ii_coor:", ii_coor.shape, ", LREP:", len(LREP)
-		print 'potential calculation completed. writing pdb...'
-		write_pdb(ii_coor,LREP,fr)
-	time2 =time.time()
-	print 'trajectory loop time:', time2-time1
+	grid_method = 'n'
+	selection_key = "resname GOL or resname TRG or resname TAS or resname GLB"
+	dL = 1 
+	av_LREP = 'n'
+	water_resname = "resname TIP3"
+	name_modifier = ""
+	verbose = 3
+	nthreads = 1
+	writepdb = 'n'
 
-electrostatic_map()
+	#--- LOAD VARIABLES INTO GLOBAL NAMESPACE
+	global box_shift
+	global positions
+	global water
+	global nframes
+
+	#--- READ DATA
+	[nframes, positions, water] = extract_traj_info(grofile,trajfile,selection_key)
+	Parallel(n_jobs=nthreads)(delayed(run_emaps,has_shareable_memory)(fr) for fr in range(nframes))
+
+traj = "/home/dillion/research/HRF/constrained_atoms/TAS/TAS.dcd"
+psf =  "/home/dillion/research/HRF/constrained_atoms/TAS/beta.psf"
+
+electrostatic_map(psf,traj)
+ 
